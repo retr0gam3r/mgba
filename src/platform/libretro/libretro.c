@@ -19,12 +19,7 @@
 #error "Can't compile the libretro core as anything other than libretro."
 #endif
 
-#ifdef _3DS
-#include <3ds.h>
-FS_Archive sdmcArchive;
-#endif
-
-#define SAMPLES 1024
+#define SAMPLES 128
 #define RUMBLE_PWM 35
 
 #define SOLAR_SENSOR_LEVEL "mgba_solar_sensor_level"
@@ -39,6 +34,7 @@ static retro_set_rumble_state_t rumbleCallback;
 
 static void GBARetroLog(struct GBAThread* thread, enum GBALogLevel level, const char* format, va_list args);
 
+static void _postAudioBuffer(struct GBAAVStream*, struct GBAAudio* audio);
 static void _setRumble(struct GBARumble* rumble, int enable);
 static uint8_t _readLux(struct GBALuminanceSource* lux);
 static void _updateLux(struct GBALuminanceSource* lux);
@@ -109,7 +105,6 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
    info->geometry.base_height = VIDEO_VERTICAL_PIXELS;
    info->geometry.max_width = VIDEO_HORIZONTAL_PIXELS;
    info->geometry.max_height = VIDEO_VERTICAL_PIXELS;
-   info->geometry.aspect_ratio = 3.0 / 2.0;
    info->timing.fps =  GBA_ARM7TDMI_FREQUENCY / (float) VIDEO_TOTAL_LENGTH;
    info->timing.sample_rate = 32768;
 }
@@ -140,8 +135,8 @@ void retro_init(void) {
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN, "Down" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "R" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "L" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "Brighten Solar Sensor" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "Darken Solar Sensor" }
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2, "Brighten Solar Sensor" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2, "Darken Solar Sensor" }
 	};
 	environCallback(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, &inputDescriptors);
 
@@ -169,7 +164,7 @@ void retro_init(void) {
 	}
 
 	stream.postAudioFrame = 0;
-	stream.postAudioBuffer = 0;
+	stream.postAudioBuffer = _postAudioBuffer;
 	stream.postVideoFrame = 0;
 
 	GBAContextInit(&context, 0);
@@ -196,11 +191,7 @@ void retro_init(void) {
 	}
 
 	GBAVideoSoftwareRendererCreate(&renderer);
-#ifdef _3DS
-   renderer.outputBuffer = linearMemAlign(256 * VIDEO_VERTICAL_PIXELS * BYTES_PER_PIXEL, 0x80);
-#else
 	renderer.outputBuffer = malloc(256 * VIDEO_VERTICAL_PIXELS * BYTES_PER_PIXEL);
-#endif
 	renderer.outputBufferStride = 256;
 	context.renderer = &renderer.d;
 
@@ -222,11 +213,7 @@ void retro_deinit(void) {
 	GBACheatRemoveSet(&cheats, &cheatSet);
 	GBACheatDeviceDestroy(&cheats);
 	GBACheatSetDeinit(&cheatSet);
-#ifdef _3DS
-   linearFree(renderer.outputBuffer);
-#else
 	free(renderer.outputBuffer);
-#endif
 }
 
 void retro_run(void) {
@@ -247,16 +234,16 @@ void retro_run(void) {
 
 	static bool wasAdjustingLux = false;
 	if (wasAdjustingLux) {
-		wasAdjustingLux = inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3) ||
-		                  inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3);
+		wasAdjustingLux = inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2) ||
+		                  inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2);
 	} else {
-		if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3)) {
+		if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2)) {
 			++luxLevel;
 			if (luxLevel > 10) {
 				luxLevel = 10;
 			}
 			wasAdjustingLux = true;
-		} else if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3)) {
+		} else if (inputCallback(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2)) {
 			--luxLevel;
 			if (luxLevel < 0) {
 				luxLevel = 0;
@@ -267,25 +254,6 @@ void retro_run(void) {
 
 	GBAContextFrame(&context, keys);
 	videoCallback(renderer.outputBuffer, VIDEO_HORIZONTAL_PIXELS, VIDEO_VERTICAL_PIXELS, BYTES_PER_PIXEL * renderer.outputBufferStride);
-
-	struct GBAAudio* audio = &context.gba->audio;
-
-	int16_t samples[SAMPLES * 2];
-#if RESAMPLE_LIBRARY == RESAMPLE_BLIP_BUF
-	int produced = blip_read_samples(audio->left, samples, SAMPLES, true);
-	blip_read_samples(audio->right, samples + 1, SAMPLES, true);
-#else
-	int produced = CircleBufferSize(&audio->left) / 2;
-	int16_t samplesR[SAMPLES];
-	GBAAudioCopy(audio, &samples[SAMPLES], samplesR, produced);
-	size_t i;
-	for (i = 0; i < produced; ++i) {
-		samples[i * 2] = samples[SAMPLES + i];
-		samples[i * 2 + 1] = samplesR[i];
-	}
-#endif
-
-	audioCallback(samples, produced);
 }
 
 void retro_reset(void) {
@@ -398,39 +366,28 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info* i
 }
 
 void* retro_get_memory_data(unsigned id) {
-	if (id == RETRO_MEMORY_SAVE_RAM) {
-		return savedata;
+	if (id != RETRO_MEMORY_SAVE_RAM) {
+		return 0;
 	}
-	if (id == RETRO_MEMORY_SYSTEM_RAM) {
-		return context.gba->memory.wram;
-	}
-	if (id == RETRO_MEMORY_VIDEO_RAM) {
-		return context.gba->video.renderer->vram;
-	}
-	return 0;
+	return savedata;
 }
 
 size_t retro_get_memory_size(unsigned id) {
-	if (id == RETRO_MEMORY_SAVE_RAM) {
-		switch (context.gba->memory.savedata.type) {
-		case SAVEDATA_AUTODETECT:
-		case SAVEDATA_FLASH1M:
-			return SIZE_CART_FLASH1M;
-		case SAVEDATA_FLASH512:
-			return SIZE_CART_FLASH512;
-		case SAVEDATA_EEPROM:
-			return SIZE_CART_EEPROM;
-		case SAVEDATA_SRAM:
-			return SIZE_CART_SRAM;
-		case SAVEDATA_FORCE_NONE:
-			return 0;
-		}
+	if (id != RETRO_MEMORY_SAVE_RAM) {
+		return 0;
 	}
-	if (id == RETRO_MEMORY_SYSTEM_RAM) {
-		return SIZE_WORKING_RAM;
-	}
-	if (id == RETRO_MEMORY_VIDEO_RAM) {
-		return SIZE_VRAM;
+	switch (context.gba->memory.savedata.type) {
+	case SAVEDATA_AUTODETECT:
+	case SAVEDATA_FLASH1M:
+		return SIZE_CART_FLASH1M;
+	case SAVEDATA_FLASH512:
+		return SIZE_CART_FLASH512;
+	case SAVEDATA_EEPROM:
+		return SIZE_CART_EEPROM;
+	case SAVEDATA_SRAM:
+		return SIZE_CART_SRAM;
+	case SAVEDATA_FORCE_NONE:
+		return 0;
 	}
 	return 0;
 }
@@ -467,6 +424,24 @@ void GBARetroLog(struct GBAThread* thread, enum GBALogLevel level, const char* f
 		break;
 	}
 	logCallback(retroLevel, "%s\n", message);
+}
+
+static void _postAudioBuffer(struct GBAAVStream* stream, struct GBAAudio* audio) {
+	UNUSED(stream);
+	int16_t samples[SAMPLES * 2];
+#if RESAMPLE_LIBRARY == RESAMPLE_BLIP_BUF
+	blip_read_samples(audio->left, samples, SAMPLES, true);
+	blip_read_samples(audio->right, samples + 1, SAMPLES, true);
+#else
+	int16_t samplesR[SAMPLES];
+	GBAAudioCopy(audio, &samples[SAMPLES], samplesR, SAMPLES);
+	size_t i;
+	for (i = 0; i < SAMPLES; ++i) {
+		samples[i * 2] = samples[SAMPLES + i];
+		samples[i * 2 + 1] = samplesR[i];
+	}
+#endif
+	audioCallback(samples, SAMPLES);
 }
 
 static void _setRumble(struct GBARumble* rumble, int enable) {
